@@ -3,9 +3,9 @@ package main
 import (
 	"fmt"
 	"github.com/levenlabs/go-llog"
-	"github.com/mediocregopher/radix.v2/redis"
+	"github.com/mediocregopher/lever"
+	"github.com/mediocregopher/radix.v2/pool"
 	"net/http"
-	"strconv"
 )
 
 const (
@@ -18,141 +18,95 @@ const (
 	Draw = 2
 )
 
+// Given weapon1 and weapon2 are each one of the consts Rock, Paper, or Scissors, get the result
+// for weapon1 of a game between those two weapons via resultChart[weapon1][weapon2]
 var resultsChart = [][]int{
 	[]int{Draw, Lose, Win},
 	[]int{Win, Draw, Lose},
 	[]int{Lose, Win, Draw},
 }
 
+// Slice for converting between the weapon consts and weapon strings
 var weaponList = []string{"rock", "paper", "scissors"}
+var statsPool *pool.Pool
 
+// A Competitor holds the username and weapon chosen by a client, as well as a channel
+// for informing the client of the result of their match
 type Competitor struct {
 	Username      string
 	Weapon        int
 	ResultChannel chan int
 }
 
+// Returns a string representation of the Competitor
 func (c *Competitor) String() string {
 	return fmt.Sprintf("{Username: %v, Weapon: %v}", c.Username, weaponList[c.Weapon])
 }
 
+// Given two weapons, return (result for the first weapon, result for the second weapon)
 func compete(weapon1, weapon2 int) (int, int) {
 	return resultsChart[weapon1][weapon2], resultsChart[weapon2][weapon1]
 }
 
-func matchmaker(competitorChannel chan Competitor) {
-	client, err := redis.Dial("tcp", "localhost:6379")
+// Given two usernames, and the first username's result, update the leaderboard, and
+// return the username of the winner. If the result was a draw, returns ""
+func updateStats(username1, username2 string, result1 int) string {
+	conn, err := statsPool.Get()
 	if err != nil {
-		llog.Error("Error connecting to redis", llog.KV{"error": err})
+		llog.Error("Error getting connection from redis pool", llog.KV{"error": err})
 	}
+
+	var resultString string
+
+	switch result1 {
+	case Win:
+		resultString = username1
+		conn.Cmd("ZINCRBY", "rps-wins", 1, username1)
+		conn.Cmd("ZINCRBY", "rps-losses", 1, username2)
+		conn.Cmd("HINCRBY", "user-"+username1, "wins", 1)
+		conn.Cmd("HINCRBY", "user-"+username2, "losses", 1)
+	case Lose:
+		resultString = username2
+		conn.Cmd("ZINCRBY", "rps-losses", 1, username1)
+		conn.Cmd("ZINCRBY", "rps-wins", 1, username2)
+		conn.Cmd("HINCRBY", "user-"+username1, "losses", 1)
+		conn.Cmd("HINCRBY", "user-"+username2, "wins", 1)
+	default:
+		resultString = ""
+		conn.Cmd("ZINCRBY", "rps-draws", 1, username1)
+		conn.Cmd("ZINCRBY", "rps-draws", 1, username2)
+	}
+	statsPool.Put(conn)
+	return resultString
+}
+
+// Given a Competitor channel, matchmaker gets two Competitors from the channel, sends the
+// Competitors' results to their respective ResultsChannel, and logs the match. This is repeated
+// until the program is terminated.
+func matchmaker(competitorChannel chan Competitor) {
 
 	for {
 		competitor1 := <-competitorChannel
 		competitor2 := <-competitorChannel
 
 		result1, result2 := compete(competitor1.Weapon, competitor2.Weapon)
-
-		r := client.Cmd("HMGET", "user-"+competitor1.Username, "wins", "losses")
-		if r.Err != nil {
-			llog.Error("Error fetching wins/losses from redis", llog.KV{"error": err})
-		}
-		arr, _ := r.Array()
-		wins, _ := arr[0].Int()
-		losses, _ := arr[1].Int()
-		var stats1 = map[string]int{
-			"wins":   wins,
-			"losses": losses,
-		}
-
-		r = client.Cmd("HMGET", "user-"+competitor2.Username, "wins", "losses")
-		if r.Err != nil {
-			llog.Error("Error fetching wins/losses from redis", llog.KV{"error": err})
-		}
-		arr, _ = r.Array()
-		wins, _ = arr[0].Int()
-		losses, _ = arr[1].Int()
-		var stats2 = map[string]int{
-			"wins":   wins,
-			"losses": losses,
-		}
-
-		r = client.Cmd("HMGET", "max-stats", "winner", "wins", "loser", "losses")
-		if r.Err != nil {
-			llog.Error("Error fetching max-stats from redis", llog.KV{"error": err})
-		}
-		arr, _ = r.Array()
-		winner, _ := arr[0].Str()
-		winsString, _ := arr[1].Str()
-		loser, _ := arr[2].Str()
-		lossesString, _ := arr[3].Str()
-		var maxStats = map[string]string{
-			"winner": winner,
-			"wins":   winsString,
-			"loser":  loser,
-			"losses": lossesString,
-		}
-		statsChanged := false
-		maxStatsChanged := false
-		maxWins, _ := strconv.Atoi(maxStats["wins"])
-		maxLosses, _ := strconv.Atoi(maxStats["losses"])
-		var resultString string
-
-		switch result1 {
-		case Win:
-			resultString = competitor1.Username
-			stats1["wins"] += 1
-			stats2["losses"] += 1
-			statsChanged = true
-			if stats1["wins"] > maxWins {
-				maxStats["winner"] = competitor1.Username
-				maxStats["wins"] = strconv.Itoa(stats1["wins"])
-				maxStatsChanged = true
-			}
-			if stats2["losses"] > maxLosses {
-				maxStats["loser"] = competitor2.Username
-				maxStats["losses"] = strconv.Itoa(stats2["losses"])
-				maxStatsChanged = true
-			}
-		case Lose:
-			resultString = competitor2.Username
-			stats1["losses"] += 1
-			stats2["wins"] += 1
-			statsChanged = true
-			if stats2["wins"] > maxWins {
-				maxStats["winner"] = competitor2.Username
-				maxStats["wins"] = strconv.Itoa(stats2["wins"])
-				maxStatsChanged = true
-			}
-			if stats1["losses"] > maxLosses {
-				maxStats["loser"] = competitor1.Username
-				maxStats["losses"] = strconv.Itoa(stats1["losses"])
-				maxStatsChanged = true
-			}
-		default:
-			resultString = ""
-		}
-
-		if statsChanged {
-			client.Cmd("HMSET", "user-"+competitor1.Username, stats1)
-			client.Cmd("HMSET", "user-"+competitor2.Username, stats2)
-		}
-
-		if maxStatsChanged {
-			client.Cmd("HMSET", "max-stats", maxStats)
-		}
+		resultString := updateStats(competitor1.Username, competitor2.Username, result1)
 
 		competitor1.ResultChannel <- result1
 		competitor2.ResultChannel <- result2
 
 		llog.Info("A grand battle has occured", llog.KV{
-			"Competitor 1":        competitor1.String(),
-			"Competitor 2":        competitor2.String(),
-			"Winner":              resultString,
-			"Current High Scores": maxStats,
+			"Competitor 1": competitor1.String(),
+			"Competitor 2": competitor2.String(),
+			"Winner":       resultString,
 		})
 	}
 }
 
+// Wrapper function for creating an endpoint for a weapon. If "iam" is defined in the query
+// string, use its value as the Competitor's username. Otherwise use the client's ip.
+// After a result is sent to the Competitor's ResultChannel, write an appropriate message
+// to the client's ResponseWriter.
 func rpsHandler(weapon int, competitorChannel chan Competitor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		resultChannel := make(chan int)
@@ -177,11 +131,25 @@ func rpsHandler(weapon int, competitorChannel chan Competitor) http.HandlerFunc 
 	}
 }
 
+// Initializes redis pool, spins up a matchmaker routine, and creates the endpoints for the three weapons.
+// When starting rps-go, you can specify the port to listen on via the --port tag.
+// (e.g. ./rps-go --port 3000)
+// Default port is 8080
 func main() {
+	f := lever.New("rps-go", nil)
+	f.Add(lever.Param{Name: "--port", Default: "8080"})
+	f.Parse()
+	var err error
+	statsPool, err = pool.New("tcp", "localhost:6379", 10)
+	if err != nil {
+		llog.Error("Error getting redis pool", llog.KV{"error": err})
+	}
+
+	port, _ := f.ParamStr("--port")
 	competitorChannel := make(chan Competitor)
 	go matchmaker(competitorChannel)
 	http.HandleFunc("/rock", rpsHandler(Rock, competitorChannel))
 	http.HandleFunc("/paper", rpsHandler(Paper, competitorChannel))
 	http.HandleFunc("/scissors", rpsHandler(Scissors, competitorChannel))
-	http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(":"+port, nil)
 }
