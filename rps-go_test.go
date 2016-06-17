@@ -36,8 +36,13 @@ func TestPlayerTwoWins(t *testing.T) {
 	req2, _ := http.NewRequest("GET", "/paper?iam=tester2", nil)
 	w1 := httptest.NewRecorder()
 	w2 := httptest.NewRecorder()
-	go rpsHandle1.ServeHTTP(w1, req1)
+	w1Chan := make(chan bool)
+	go func() {
+		rpsHandle1.ServeHTTP(w1, req1)
+		w1Chan <- true
+	}()
 	rpsHandle2.ServeHTTP(w2, req2)
+	<-w1Chan
 
 	r := conn.Cmd("HMGET", "user-tester2", "wins", "losses")
 	elems, _ := r.Array()
@@ -55,6 +60,7 @@ func TestPlayerTwoWins(t *testing.T) {
 
 	assert.Equal(t, wins, 0)
 	assert.Equal(t, losses, 1)
+	assert.Equal(t, w1.Body.String(), "Sorry, tester1, you lost!")
 }
 
 func TestPlayerOneWins(t *testing.T) {
@@ -69,8 +75,13 @@ func TestPlayerOneWins(t *testing.T) {
 	req2, _ := http.NewRequest("GET", "/scissors?iam=tester2", nil)
 	w1 := httptest.NewRecorder()
 	w2 := httptest.NewRecorder()
-	go rpsHandle1.ServeHTTP(w1, req1)
+	w1Chan := make(chan bool)
+	go func() {
+		rpsHandle1.ServeHTTP(w1, req1)
+		w1Chan <- true
+	}()
 	rpsHandle2.ServeHTTP(w2, req2)
+	<-w1Chan
 
 	r := conn.Cmd("HMGET", "user-tester2", "wins", "losses")
 	elems, _ := r.Array()
@@ -88,6 +99,7 @@ func TestPlayerOneWins(t *testing.T) {
 
 	assert.Equal(t, wins, 1)
 	assert.Equal(t, losses, 0)
+	assert.Equal(t, w1.Body.String(), "Congrats, tester1, you won!")
 }
 
 func TestDraw(t *testing.T) {
@@ -102,8 +114,13 @@ func TestDraw(t *testing.T) {
 	req2, _ := http.NewRequest("GET", "/paper?iam=tester2", nil)
 	w1 := httptest.NewRecorder()
 	w2 := httptest.NewRecorder()
-	go rpsHandle1.ServeHTTP(w1, req1)
+	w1Chan := make(chan bool)
+	go func() {
+		rpsHandle1.ServeHTTP(w1, req1)
+		w1Chan <- true
+	}()
 	rpsHandle2.ServeHTTP(w2, req2)
+	<-w1Chan
 
 	r := conn.Cmd("HMGET", "user-tester2", "wins", "losses")
 	elems, _ := r.Array()
@@ -121,4 +138,5 @@ func TestDraw(t *testing.T) {
 
 	assert.Equal(t, wins, 0)
 	assert.Equal(t, losses, 0)
+	assert.Equal(t, w1.Body.String(), "Well, tester1, you didn't lose, but you didn't win either. It was a draw!")
 }
